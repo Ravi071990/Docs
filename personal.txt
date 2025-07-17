@@ -1,0 +1,160 @@
+-- Create database admin with superuser
+\c postgres postgres
+CREATE ROLE dbadmin LOGIN CREATEROLE CREATEDB PASSWORD "{{ lookup( 'pipe', `date +%y*%m*%d*%H*%M*%S` ) }}{{ FQDN }}";
+
+\c postgres dbadmin
+
+create role auth_pg;
+
+GRANT auth_pg to dbadmin;
+
+--Switch to DBADMIN - Create database owner
+\c postgres dbadmin
+CREATE ROLE "{{ appcode }}{{ __environment }}_db_owner";
+GRANT {{ appcode }}{{ __environment }}_db_owner to dbadmin;
+
+
+-- Create DB with dbadmin
+\c postgres dbadmin
+CREATE DATABASE {{ appcode }}{{ __environment }} OWNER "{{ appcode }}{{ __environment }}_owner";
+
+
+-- Revoke everythig from public in {{ appcode }}{{ __environment }} database
+\c {{ appcode }}{{ __environment }} dbadmin
+REVOKE ALL PRIVILEGES ON SCHEMA public FROM PUBLIC;
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+
+--------SCHEMA CREATION
+
+-- Create schema, schema owner and schema role
+
+\c {{ appcode }}{{ __environment }} dbadmin
+CREATE ROLE "{{ appcode }}{{ __environment }}_owner" LOGIN;
+GRANT "{{ appcode }}{{ __environment }}_owner" to dbadmin;
+CREATE SCHEMA {{ appcode }}{{ __environment }} authorization "{{ appcode }}{{ __environment }}_owner";
+CREATE ROLE {{ appcode }}{{ __environment }} LOGIN PASSWORD '{{ appcode }}{{ __environment }}';
+GRANT auth_pg to {{ appcode }}{{ __environment }};
+
+
+-- Set search path for {{ appcode }}{{ __environment }} role
+\c {{ appcode }}{{ __environment }} dbadmin
+ALTER ROLE {{ appcode }}{{ __environment }} SET SEARCH_PATH TO '{{ appcode }}{{ __environment }}' ;
+
+
+-- Create roles for read, write and upsert
+\c {{ appcode }}{{ __environment }} dbadmin
+CREATE ROLE "r_{{ appcode }}{{ __environment }}_admin";
+CREATE ROLE "r_{{ appcode }}{{ __environment }}_write" NOINHERIT;
+CREATE ROLE "r_{{ appcode }}{{ __environment }}_upsert" NOINHERIT;
+CREATE ROLE "r_{{ appcode }}{{ __environment }}_read" NOINHERIT;
+
+-- Enable {{ appcode }}{{ __environment }} role to assign read, admin, write and upsert roles to other users
+\c {{ appcode }}{{ __environment }} dbadmin
+GRANT "r_{{ appcode }}{{ __environment }}_write", "r_{{ appcode }}{{ __environment }}_upsert", "r_{{ appcode }}{{ __environment }}_read" TO "{{ appcode }}{{ __environment }}_owner";
+GRANT "r_{{ appcode }}{{ __environment }}_write", "r_{{ appcode }}{{ __environment }}_upsert", "r_{{ appcode }}{{ __environment }}_read" TO {{ appcode }}{{ __environment }} WITH ADMIN OPTION;
+
+-- Create and Define admin role for {{ appcode }}{{ __environment }} schema
+\c {{ appcode }}{{ __environment }} dbadmin
+GRANT "{{ appcode }}{{ __environment }}_owner" TO "r_{{ appcode }}{{ __environment }}_admin";
+GRANT {{ appcode }}{{ __environment }}_owner TO {{ appcode }}{{ __environment }};
+
+-- Revoke team_owner from dbadmin
+\c {{ appcode }}{{ __environment }} dbadmin
+REVOKE "{{ appcode }}{{ __environment }}_owner" from dbadmin;
+
+-- Define write role for {{ appcode }}{{ __environment }} schema - no truncate
+\c {{ appcode }}{{ __environment }} {{ appcode }}{{ __environment }}
+GRANT USAGE ON SCHEMA {{ appcode }}{{ __environment }} TO "r_{{ appcode }}{{ __environment }}_write";
+GRANT SELECT, INSERT, UPDATE, DELETE, REFERENCES, TRIGGER ON ALL TABLES IN SCHEMA {{ appcode }}{{ __environment }} TO "r_{{ appcode }}{{ __environment }}_write";
+ALTER DEFAULT PRIVILEGES IN SCHEMA {{ appcode }}{{ __environment }} GRANT SELECT, INSERT, UPDATE, DELETE, REFERENCES, TRIGGER ON TABLES TO "r_{{ appcode }}{{ __environment }}_write";
+GRANT USAGE ON ALL SEQUENCES IN SCHEMA {{ appcode }}{{ __environment }} TO "r_{{ appcode }}{{ __environment }}_write";
+ALTER DEFAULT PRIVILEGES IN SCHEMA {{ appcode }}{{ __environment }} GRANT USAGE ON SEQUENCES TO "r_{{ appcode }}{{ __environment }}_write";
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA {{ appcode }}{{ __environment }} TO "r_{{ appcode }}{{ __environment }}_write";
+ALTER DEFAULT PRIVILEGES IN SCHEMA {{ appcode }}{{ __environment }} GRANT EXECUTE ON FUNCTIONS TO "r_{{ appcode }}{{ __environment }}_write";
+
+-- Define upsert role for {{ appcode }}{{ __environment }} schema
+\c {{ appcode }}{{ __environment }} {{ appcode }}{{ __environment }}
+GRANT USAGE ON SCHEMA {{ appcode }}{{ __environment }} TO "r_{{ appcode }}{{ __environment }}_upsert";
+GRANT SELECT, INSERT, UPDATE, REFERENCES, TRIGGER ON ALL TABLES IN SCHEMA {{ appcode }}{{ __environment }} TO "r_{{ appcode }}{{ __environment }}_upsert";
+ALTER DEFAULT PRIVILEGES IN SCHEMA {{ appcode }}{{ __environment }} GRANT SELECT, INSERT, UPDATE, REFERENCES, TRIGGER ON TABLES TO "r_{{ appcode }}{{ __environment }}_upsert";
+GRANT USAGE ON ALL SEQUENCES IN SCHEMA {{ appcode }}{{ __environment }} TO "r_{{ appcode }}{{ __environment }}_upsert";
+ALTER DEFAULT PRIVILEGES IN SCHEMA {{ appcode }}{{ __environment }} GRANT USAGE ON SEQUENCES TO "r_{{ appcode }}{{ __environment }}_upsert";
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA {{ appcode }}{{ __environment }} TO "r_{{ appcode }}{{ __environment }}_upsert";
+ALTER DEFAULT PRIVILEGES IN SCHEMA {{ appcode }}{{ __environment }} GRANT EXECUTE ON FUNCTIONS TO "r_{{ appcode }}{{ __environment }}_upsert";
+
+-- Create read role for {{ appcode }}{{ __environment }} schema
+\c {{ appcode }}{{ __environment }} {{ appcode }}{{ __environment }}
+GRANT USAGE ON SCHEMA {{ appcode }}{{ __environment }} TO "r_{{ appcode }}{{ __environment }}_read";
+GRANT SELECT ON ALL TABLES IN SCHEMA {{ appcode }}{{ __environment }} TO "r_{{ appcode }}{{ __environment }}_read";
+ALTER DEFAULT PRIVILEGES IN SCHEMA {{ appcode }}{{ __environment }} GRANT SELECT ON TABLES TO "r_{{ appcode }}{{ __environment }}_read";
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA {{ appcode }}{{ __environment }} TO "r_{{ appcode }}{{ __environment }}_read";
+ALTER DEFAULT PRIVILEGES IN SCHEMA {{ appcode }}{{ __environment }} GRANT EXECUTE ON FUNCTIONS TO "r_{{ appcode }}{{ __environment }}_read";
+
+-- CREATE EXTENSION
+\c {{ appcode }}{{ __environment }} postgres
+CREATE EXTENSION pg_stat_statements schema pg_catalog;
+
+----------------------------------------------------------------
+
+
+CREATE OR REPLACE PROCEDURE public.create_schema_roles(
+	IN p_schemadetails text)
+LANGUAGE 'plpgsql'
+AS $BODY$
+BEGIN
+    -- Step 1: Create schema owner role
+    EXECUTE format('CREATE ROLE %I LOGIN PASSWORD %L', p_schemadetails, 'hostname');
+
+    -- Step 2: Grant base auth role to schemaowner
+    EXECUTE format('GRANT auth_pg TO %I', p_schemadetails);
+
+    -- Step 3: Grant schemaowner to dbadmin (for setup purposes)
+    EXECUTE format('GRANT %I TO dbadmin', p_schemadetails);
+
+    -- Step 4: Create schema
+    EXECUTE format('CREATE SCHEMA IF NOT EXISTS %I AUTHORIZATION %I', p_schemadetails, p_schemadetails);
+
+    -- Step 5: Set search_path
+    EXECUTE format('ALTER ROLE %I SET search_path TO %I', p_schemadetails, p_schemadetails);
+
+    -- Step 6: Create access roles
+    EXECUTE format('CREATE ROLE r_%s_admin', p_schemadetails);
+    EXECUTE format('CREATE ROLE r_%s_write NOINHERIT', p_schemadetails);
+    EXECUTE format('CREATE ROLE r_%s_upsert NOINHERIT', p_schemadetails);
+    EXECUTE format('CREATE ROLE r_%s_read NOINHERIT', p_schemadetails);
+
+    -- Step 7: Grant schema usage
+    EXECUTE format('GRANT USAGE ON SCHEMA %I TO r_%s_write, r_%s_upsert, r_%s_read',
+                   p_schemadetails, p_schemadetails, p_schemadetails, p_schemadetails);
+
+    -- Step 8: Grant privileges on existing objects
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE, REFERENCES, TRIGGER ON ALL TABLES IN SCHEMA %I TO r_%s_write', p_schemadetails, p_schemadetails);
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE, REFERENCES, TRIGGER ON ALL TABLES IN SCHEMA %I TO r_%s_upsert', p_schemadetails, p_schemadetails);
+    EXECUTE format('GRANT SELECT ON ALL TABLES IN SCHEMA %I TO r_%s_read', p_schemadetails, p_schemadetails);
+
+    EXECUTE format('GRANT USAGE ON ALL SEQUENCES IN SCHEMA %I TO r_%s_write, r_%s_upsert', p_schemadetails, p_schemadetails, p_schemadetails);
+    EXECUTE format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA %I TO r_%s_write, r_%s_upsert, r_%s_read',
+                   p_schemadetails, p_schemadetails, p_schemadetails, p_schemadetails);
+
+    -- Step 9: Default privileges for future objects
+    EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT SELECT, INSERT, UPDATE, DELETE, REFERENCES, TRIGGER ON TABLES TO r_%s_write', p_schemadetails, p_schemadetails, p_schemadetails);
+    EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT SELECT, INSERT, UPDATE, REFERENCES, TRIGGER ON TABLES TO r_%s_upsert', p_schemadetails, p_schemadetails, p_schemadetails);
+    EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT SELECT ON TABLES TO r_%s_read', p_schemadetails, p_schemadetails, p_schemadetails);
+
+    EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT USAGE ON SEQUENCES TO r_%s_write, r_%s_upsert', p_schemadetails, p_schemadetails, p_schemadetails, p_schemadetails);
+    EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT EXECUTE ON FUNCTIONS TO r_%s_write, r_%s_upsert, r_%s_read',
+                   p_schemadetails, p_schemadetails, p_schemadetails, p_schemadetails, p_schemadetails);
+
+    -- Step 10: Grant membership
+    EXECUTE format('GRANT r_%s_write, r_%s_upsert, r_%s_read TO %I WITH ADMIN OPTION',
+                   p_schemadetails, p_schemadetails, p_schemadetails, p_schemadetails);
+
+    EXECUTE format('GRANT %I TO r_%s_admin', p_schemadetails, p_schemadetails);
+
+    -- Step 11: Revoke schemaowner from dbadmin (cleanup)
+    EXECUTE format('REVOKE %I FROM dbadmin', p_schemadetails);
+
+END;
+$BODY$;
+
+ALTER procedure create_schema_roles OWNER TO dbadmin;
