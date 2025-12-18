@@ -1,0 +1,195 @@
+CREATE OR REPLACE PROCEDURE public.grant_schema_role(
+    p_schema text,
+    p_target_role text
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    owner_role text;
+    grant_role text;
+BEGIN
+    -- Validate target role
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_roles WHERE rolname = p_target_role
+    ) THEN
+        RAISE EXCEPTION 'Role "%" does not exist', p_target_role;
+    END IF;
+
+    -- Get schema owner role
+    SELECT r.rolname
+    INTO owner_role
+    FROM pg_namespace n
+    JOIN pg_roles r ON r.oid = n.nspowner
+    WHERE n.nspname = p_schema;
+
+    IF owner_role IS NULL THEN
+        RAISE EXCEPTION 'Schema "%" does not exist', p_schema;
+    END IF;
+
+    -- Caller must be schema owner
+    IF NOT pg_has_role(session_user, owner_role, 'member') THEN
+        RAISE EXCEPTION
+            'Caller "%" is not authorized for schema "%"',
+            session_user, p_schema;
+    END IF;
+
+    -- Default behavior (unchanged)
+    grant_role := owner_role;
+
+    -- ONLY new logic: AD user detection
+    IF EXISTS (
+        SELECT 1
+        FROM pg_authid
+        WHERE rolname = p_target_role
+          AND rolcanlogin
+          AND rolpassword IS NULL
+    ) THEN
+        grant_role := 'auth_ad';
+    END IF;
+
+    -- Grant role
+    EXECUTE format('GRANT %I TO %I', grant_role, p_target_role);
+
+    RAISE NOTICE
+        'Granted role "%" to "%"', grant_role, p_target_role;
+END;
+$$;
+
+-- Lock down execution
+REVOKE ALL ON PROCEDURE public.grant_schema_role(text, text) FROM PUBLIC;
+GRANT EXECUTE ON PROCEDURE public.grant_schema_role(text, text) TO auth_ad;
+
+
+-------
+
+CREATE OR REPLACE PROCEDURE public.revoke_schema_role(
+    p_schema text,
+    p_target_role text
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    owner_role text;
+    revoke_role text;
+BEGIN
+    -- Validate target role
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_roles WHERE rolname = p_target_role
+    ) THEN
+        RAISE EXCEPTION 'Role "%" does not exist', p_target_role;
+    END IF;
+
+    -- Get schema owner role
+    SELECT r.rolname
+    INTO owner_role
+    FROM pg_namespace n
+    JOIN pg_roles r ON r.oid = n.nspowner
+    WHERE n.nspname = p_schema;
+
+    IF owner_role IS NULL THEN
+        RAISE EXCEPTION 'Schema "%" does not exist', p_schema;
+    END IF;
+
+    -- Caller must be schema owner
+    IF NOT pg_has_role(session_user, owner_role, 'member') THEN
+        RAISE EXCEPTION
+            'Caller "%" is not authorized for schema "%"',
+            session_user, p_schema;
+    END IF;
+
+    -- Default behavior (unchanged)
+    revoke_role := owner_role;
+
+    -- AD-user logic (same as GRANT)
+    IF EXISTS (
+        SELECT 1
+        FROM pg_authid
+        WHERE rolname = p_target_role
+          AND rolcanlogin
+          AND rolpassword IS NULL
+    ) THEN
+        revoke_role := 'auth_ad';
+    END IF;
+
+    -- Revoke role
+    EXECUTE format('REVOKE %I FROM %I', revoke_role, p_target_role);
+
+    RAISE NOTICE
+        'Revoked role "%" from "%"', revoke_role, p_target_role;
+END;
+$$;
+
+-- Lock it down
+REVOKE ALL ON PROCEDURE public.revoke_schema_role(text, text) FROM PUBLIC;
+GRANT EXECUTE ON PROCEDURE public.revoke_schema_role(text, text) TO auth_ad;
+
+
+-----------------
+
+CREATE OR REPLACE PROCEDURE public.drop_schema_and_roles(p_schema text)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    -- roles derived from schema name
+    r_admin   text := 'r_' || p_schema || '_admin';
+    r_write   text := 'r_' || p_schema || '_write';
+    r_read    text := 'r_' || p_schema || '_read';
+    r_upsert  text := 'r_' || p_schema || '_upsert';
+
+    v_schema_owner name;
+BEGIN
+    /*
+     * 1. Validate schema exists and get owner
+     */
+    SELECT r.rolname
+    INTO v_schema_owner
+    FROM pg_namespace n
+    JOIN pg_roles r ON r.oid = n.nspowner
+    WHERE n.nspname = p_schema;
+
+    IF v_schema_owner IS NULL THEN
+        RAISE EXCEPTION 'Schema "%" does not exist', p_schema;
+    END IF;
+
+    /*
+     * 2. Enforce: ONLY schema owner can run this
+     */
+    IF v_schema_owner <> SESSION_USER THEN
+        RAISE EXCEPTION
+            'Permission denied. Schema "%" is owned by "%", but you are "%"',
+            p_schema, v_schema_owner, SESSION_USER;
+    END IF;
+
+    /*
+     * 3. Drop schema
+     */
+    EXECUTE format('DROP SCHEMA %I CASCADE', p_schema);
+    RAISE NOTICE 'Schema "%" dropped successfully.', p_schema;
+
+    /*
+     * 4. Drop roles (if they exist)
+     */
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r_admin) THEN
+        EXECUTE format('DROP ROLE %I', r_admin);
+    END IF;
+
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r_write) THEN
+        EXECUTE format('DROP ROLE %I', r_write);
+    END IF;
+
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r_read) THEN
+        EXECUTE format('DROP ROLE %I', r_read);
+    END IF;
+
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r_upsert) THEN
+        EXECUTE format('DROP ROLE %I', r_upsert);
+    END IF;
+
+    RAISE NOTICE 'Associated roles dropped successfully for schema "%".', p_schema;
+
+END;
+$$;
