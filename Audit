@@ -1,0 +1,45 @@
+WITH user_roles AS (
+    SELECT r.rolname AS login_user,
+           r.rolname AS effective_role
+    FROM pg_roles r
+    WHERE r.rolcanlogin = true
+      AND r.rolname <> 'postgres'
+
+    UNION
+
+    SELECT r.rolname AS login_user,
+           grp.rolname AS effective_role
+    FROM pg_roles r
+    JOIN pg_auth_members a ON a.member = r.oid
+    JOIN pg_roles grp ON grp.oid = a.roleid
+    WHERE r.rolcanlogin = true
+      AND r.rolname <> 'postgres'
+      AND grp.rolname NOT LIKE 'pg_%'
+      AND grp.rolname <> 'auth_pg'
+)
+
+SELECT
+    ur.login_user,
+
+    STRING_AGG(DISTINCT ur.effective_role, ', ') AS roles,
+
+    tp.schema_name,
+
+    COUNT(DISTINCT tp.object_name) AS tables_accessible,
+
+    MAX(CASE WHEN tp.permission = 'SELECT'  AND tp.granted THEN 'YES' ELSE 'NO' END) AS can_select,
+    MAX(CASE WHEN tp.permission = 'INSERT'  AND tp.granted THEN 'YES' ELSE 'NO' END) AS can_insert,
+    MAX(CASE WHEN tp.permission = 'UPDATE'  AND tp.granted THEN 'YES' ELSE 'NO' END) AS can_update,
+    MAX(CASE WHEN tp.permission = 'DELETE'  AND tp.granted THEN 'YES' ELSE 'NO' END) AS can_delete,
+    MAX(CASE WHEN tp.permission = 'TRUNCATE' AND tp.granted THEN 'YES' ELSE 'NO' END) AS can_truncate
+
+FROM permissions.all_permissions tp
+JOIN user_roles ur
+  ON ur.effective_role = tp.role_name
+
+WHERE tp.granted = true
+AND tp.schema_name NOT IN
+('pg_catalog','information_schema','pg_toast','permissions')
+
+GROUP BY ur.login_user, tp.schema_name
+ORDER BY ur.login_user, tp.schema_name;
