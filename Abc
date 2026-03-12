@@ -1,0 +1,123 @@
+-- ============================================================
+-- QUERY 1: WHO ARE THE LOGIN USERS & WHAT ROLES DO THEY BELONG TO?
+-- Run this first to understand your user-role structure
+-- ============================================================
+
+SELECT
+    r.rolname                                               AS login_user,
+    COALESCE(m.rolname, '-- no group role --')              AS member_of_role,
+    CASE WHEN a.admin_option THEN 'YES' ELSE 'NO' END       AS is_admin_of_role,
+    CASE WHEN r.rolsuper     THEN 'YES' ELSE 'NO' END       AS is_superuser,
+    CASE WHEN r.rolcreatedb  THEN 'YES' ELSE 'NO' END       AS can_create_db
+FROM pg_roles r
+LEFT JOIN pg_auth_members a ON a.member = r.oid
+LEFT JOIN pg_roles m        ON m.oid    = a.roleid
+WHERE r.rolcanlogin = true
+  AND r.rolname    <> 'postgres'
+ORDER BY r.rolname, m.rolname;
+
+
+-- ============================================================
+-- QUERY 2: WHAT CAN EACH USER DO IN EACH SCHEMA?
+-- One row per user + schema — SELECT/INSERT/UPDATE/DELETE/TRUNCATE
+-- ============================================================
+
+WITH user_roles AS (
+    -- Each login user's own role + any group roles they inherit
+    SELECT r.rolname AS login_user, r.rolname AS effective_role
+    FROM pg_roles r
+    WHERE r.rolcanlogin = true AND r.rolname <> 'postgres'
+
+    UNION
+
+    SELECT r.rolname AS login_user, grp.rolname AS effective_role
+    FROM pg_roles r
+    JOIN pg_auth_members a ON a.member = r.oid
+    JOIN pg_roles grp      ON grp.oid  = a.roleid
+    WHERE r.rolcanlogin = true AND r.rolname <> 'postgres'
+)
+SELECT
+    ur.login_user,
+    ur.effective_role                                       AS access_via_role,
+    CASE WHEN ur.login_user = ur.effective_role
+         THEN 'DIRECT' ELSE 'INHERITED (via group role)'
+    END                                                     AS access_type,
+    tp.schema_name,
+    COUNT(DISTINCT tp.table_name)                           AS tables_accessible,
+    MAX(CASE WHEN tp.privilege_type = 'SELECT'   THEN 'YES' ELSE 'NO' END) AS can_select,
+    MAX(CASE WHEN tp.privilege_type = 'INSERT'   THEN 'YES' ELSE 'NO' END) AS can_insert,
+    MAX(CASE WHEN tp.privilege_type = 'UPDATE'   THEN 'YES' ELSE 'NO' END) AS can_update,
+    MAX(CASE WHEN tp.privilege_type = 'DELETE'   THEN 'YES' ELSE 'NO' END) AS can_delete,
+    MAX(CASE WHEN tp.privilege_type = 'TRUNCATE' THEN 'YES' ELSE 'NO' END) AS can_truncate
+FROM permissions.table_permissions tp
+JOIN user_roles ur ON ur.effective_role = tp.role_name
+WHERE tp.schema_name NOT IN ('pg_catalog','information_schema','pg_toast','permissions')
+GROUP BY ur.login_user, ur.effective_role, tp.schema_name
+ORDER BY ur.login_user, tp.schema_name;
+
+
+-- ============================================================
+-- QUERY 3: DANGEROUS ACCESS — WHO HAS DELETE OR TRUNCATE?
+-- Show this to management — needs immediate review
+-- ============================================================
+
+WITH user_roles AS (
+    SELECT r.rolname AS login_user, r.rolname AS effective_role
+    FROM pg_roles r
+    WHERE r.rolcanlogin = true AND r.rolname <> 'postgres'
+
+    UNION
+
+    SELECT r.rolname AS login_user, grp.rolname AS effective_role
+    FROM pg_roles r
+    JOIN pg_auth_members a ON a.member = r.oid
+    JOIN pg_roles grp      ON grp.oid  = a.roleid
+    WHERE r.rolcanlogin = true AND r.rolname <> 'postgres'
+)
+SELECT
+    ur.login_user,
+    ur.effective_role                                       AS access_via_role,
+    CASE WHEN ur.login_user = ur.effective_role
+         THEN 'DIRECT' ELSE 'INHERITED'
+    END                                                     AS access_type,
+    tp.schema_name,
+    tp.table_name,
+    tp.privilege_type                                       AS dangerous_privilege
+FROM permissions.table_permissions tp
+JOIN user_roles ur ON ur.effective_role = tp.role_name
+WHERE tp.privilege_type IN ('DELETE', 'TRUNCATE')
+  AND tp.schema_name NOT IN ('pg_catalog','information_schema','pg_toast','permissions')
+ORDER BY ur.login_user, tp.schema_name, tp.table_name, tp.privilege_type;
+
+
+-- ============================================================
+-- QUERY 4: SINGLE USER FULL DETAIL
+-- Replace 'arf038t' with the username you want to check
+-- ============================================================
+
+WITH user_roles AS (
+    SELECT r.rolname AS login_user, r.rolname AS effective_role
+    FROM pg_roles r
+    WHERE r.rolname = 'arf038t'   -- << CHANGE USERNAME HERE
+
+    UNION
+
+    SELECT r.rolname AS login_user, grp.rolname AS effective_role
+    FROM pg_roles r
+    JOIN pg_auth_members a ON a.member = r.oid
+    JOIN pg_roles grp      ON grp.oid  = a.roleid
+    WHERE r.rolname = 'arf038t'   -- << CHANGE USERNAME HERE
+)
+SELECT
+    ur.login_user,
+    ur.effective_role                                       AS access_via_role,
+    CASE WHEN ur.login_user = ur.effective_role
+         THEN 'DIRECT' ELSE 'INHERITED'
+    END                                                     AS access_type,
+    tp.schema_name,
+    tp.table_name,
+    tp.privilege_type                                       AS privilege
+FROM permissions.table_permissions tp
+JOIN user_roles ur ON ur.effective_role = tp.role_name
+WHERE tp.schema_name NOT IN ('pg_catalog','information_schema','pg_toast','permissions')
+ORDER BY tp.schema_name, tp.table_name, tp.privilege_type;
